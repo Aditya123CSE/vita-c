@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 
 type Doctor = {
@@ -24,69 +24,15 @@ export default function AppointmentsPage() {
   const [patientName, setPatientName] = useState('')
   const [phone, setPhone] = useState('')
   const [doctorId, setDoctorId] = useState('')
-
   const [clinicId, setClinicId] = useState('')
-
   const [doctors, setDoctors] = useState<Doctor[]>([])
-  const [appointments, setAppointments] = useState<
-    Appointment[]
-  >([])
+  const [appointments, setAppointments] = useState<Appointment[]>([])
 
-  async function getClinicId() {
-    const {
-      data: { user }
-    } = await supabase.auth.getUser()
-
-    if (!user) {
-      alert('Please login first')
-      return null
-    }
-
-    const { data: clinic, error } =
-      await supabase
-        .from('clinics')
-        .select('id')
-        .eq('user_id', user.id)
-        .single()
-
-    if (error || !clinic) {
-      alert('Clinic not found')
-      return null
-    }
-
-    setClinicId(clinic.id)
-
-    return clinic.id
-  }
-
-  async function loadDoctors() {
-    const id = await getClinicId()
-
-    if (!id) return
-
-    const { data, error } = await supabase
-      .from('doctors')
-      .select('*')
-      .eq('clinic_id', id)
-      .order('name')
-
-    if (error) {
-      console.error(error)
-      return
-    }
-
-    setDoctors((data as Doctor[]) || [])
-  }
-
-  async function loadAppointments() {
-    const id = await getClinicId()
-
-    if (!id) return
-
+  const loadAppointments = useCallback(async (currentClinicId: string) => {
     const { data, error } = await supabase
       .from('appointments')
       .select('*')
-      .eq('clinic_id', id)
+      .eq('clinic_id', currentClinicId)
       .order('token_number')
 
     if (error) {
@@ -94,24 +40,115 @@ export default function AppointmentsPage() {
       return
     }
 
-    setAppointments(
-      (data as Appointment[]) || []
-    )
-  }
+    setAppointments((data as Appointment[]) || [])
+  }, [])
+
+  useEffect(() => {
+    let isMounted = true
+
+    async function initializeAppointmentsPage() {
+      const {
+        data: { user }
+      } = await supabase.auth.getUser()
+
+      if (!user || !isMounted) {
+        return
+      }
+
+      const { data: clinic, error: clinicError } =
+        await supabase
+          .from('clinics')
+          .select('id')
+          .eq('user_id', user.id)
+          .single()
+
+      if (clinicError || !clinic || !isMounted) {
+        if (clinicError) {
+          console.error(clinicError)
+        }
+
+        alert('Clinic not found')
+        return
+      }
+
+      const currentClinicId = clinic.id as string
+
+      setClinicId(currentClinicId)
+
+      const { data: doctorRows, error: doctorsError } =
+        await supabase
+          .from('doctors')
+          .select('*')
+          .eq('clinic_id', currentClinicId)
+          .order('name')
+
+      if (doctorsError) {
+        console.error(doctorsError)
+      } else if (isMounted) {
+        setDoctors((doctorRows as Doctor[]) || [])
+      }
+
+      if (isMounted) {
+        await loadAppointments(currentClinicId)
+      }
+    }
+
+    initializeAppointmentsPage()
+
+    return () => {
+      isMounted = false
+    }
+  }, [loadAppointments])
+
+  useEffect(() => {
+    if (!clinicId) {
+      return
+    }
+
+    const channel = supabase
+      .channel(`appointments-queue-${clinicId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'appointments',
+          filter: `clinic_id=eq.${clinicId}`
+        },
+        () => {
+          loadAppointments(clinicId)
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [clinicId, loadAppointments])
 
   async function createAppointment() {
-    if (!patientName || !doctorId) {
+    if (!patientName || !doctorId || !clinicId) {
       alert('Please fill all required fields')
       return
     }
 
-    const id =
-      clinicId || (await getClinicId())
+    const { data: latestAppointment, error: tokenError } =
+      await supabase
+        .from('appointments')
+        .select('token_number')
+        .eq('clinic_id', clinicId)
+        .order('token_number', { ascending: false })
+        .limit(1)
+        .maybeSingle()
 
-    if (!id) return
+    if (tokenError) {
+      console.error(tokenError)
+      alert(tokenError.message)
+      return
+    }
 
     const nextToken =
-      appointments.length + 1
+      ((latestAppointment?.token_number as number | undefined) || 0) + 1
 
     const { error } = await supabase
       .from('appointments')
@@ -122,7 +159,7 @@ export default function AppointmentsPage() {
           doctor_id: doctorId,
           token_number: nextToken,
           status: 'Waiting',
-          clinic_id: id
+          clinic_id: clinicId
         }
       ])
 
@@ -135,31 +172,26 @@ export default function AppointmentsPage() {
     setPatientName('')
     setPhone('')
     setDoctorId('')
-
-    loadAppointments()
   }
 
   async function updateStatus(
-    id: string,
+    appointmentId: string,
     status: string
   ) {
-    const { error } = await supabase
-      .from('appointments')
-      .update({ status })
-      .eq('id', id)
-
-    if (error) {
-      console.error(error)
+    if (!clinicId) {
       return
     }
 
-    loadAppointments()
-  }
+    const { error } = await supabase
+      .from('appointments')
+      .update({ status })
+      .eq('id', appointmentId)
+      .eq('clinic_id', clinicId)
 
-  useEffect(() => {
-    loadDoctors()
-    loadAppointments()
-  }, [])
+    if (error) {
+      console.error(error)
+    }
+  }
 
   return (
     <main className="p-10 max-w-5xl mx-auto">
@@ -168,7 +200,6 @@ export default function AppointmentsPage() {
       </h1>
 
       <div className="border p-5 rounded mb-8 space-y-4">
-
         <input
           className="border p-2 w-full"
           placeholder="Patient Name"
@@ -214,11 +245,9 @@ export default function AppointmentsPage() {
         >
           Create Appointment
         </button>
-
       </div>
 
       <div className="space-y-4">
-
         {appointments.map((appointment) => (
           <div
             key={appointment.id}
@@ -241,7 +270,6 @@ export default function AppointmentsPage() {
             </p>
 
             <div className="flex gap-2 mt-3">
-
               <button
                 onClick={() =>
                   updateStatus(
@@ -265,11 +293,9 @@ export default function AppointmentsPage() {
               >
                 Complete
               </button>
-
             </div>
           </div>
         ))}
-
       </div>
     </main>
   )

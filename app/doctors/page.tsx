@@ -12,70 +12,67 @@ type Doctor = {
 
 export default function DoctorsPage() {
   const [name, setName] = useState('')
-  const [specialization, setSpecialization] =
-    useState('')
-
+  const [specialization, setSpecialization] = useState('')
   const [clinicId, setClinicId] = useState('')
-  const [doctors, setDoctors] = useState<
-    Doctor[]
-  >([])
+  const [doctors, setDoctors] = useState<Doctor[]>([])
 
-  async function getClinicId() {
-    const {
-      data: { user }
-    } = await supabase.auth.getUser()
+  useEffect(() => {
+    let isMounted = true
 
-    if (!user) {
-      alert('Please login first')
-      return null
+    async function loadDoctors() {
+      const {
+        data: { user }
+      } = await supabase.auth.getUser()
+
+      if (!user || !isMounted) {
+        alert('Please login first')
+        return
+      }
+
+      const { data: clinic, error: clinicError } =
+        await supabase
+          .from('clinics')
+          .select('id')
+          .eq('user_id', user.id)
+          .single()
+
+      if (clinicError || !clinic || !isMounted) {
+        alert('Clinic not found')
+        return
+      }
+
+      const currentClinicId = clinic.id as string
+
+      setClinicId(currentClinicId)
+
+      const { data, error } = await supabase
+        .from('doctors')
+        .select('*')
+        .eq('clinic_id', currentClinicId)
+        .order('name')
+
+      if (error) {
+        console.error(error)
+        return
+      }
+
+      if (isMounted) {
+        setDoctors((data as Doctor[]) || [])
+      }
     }
 
-    const { data: clinic, error } =
-      await supabase
-        .from('clinics')
-        .select('id')
-        .eq('user_id', user.id)
-        .single()
+    loadDoctors()
 
-    if (error || !clinic) {
-      alert('Clinic not found')
-      return null
+    return () => {
+      isMounted = false
     }
-
-    setClinicId(clinic.id)
-
-    return clinic.id
-  }
-
-  async function loadDoctors() {
-    const id = await getClinicId()
-
-    if (!id) return
-
-    const { data, error } = await supabase
-      .from('doctors')
-      .select('*')
-      .eq('clinic_id', id)
-      .order('name')
-
-    if (error) {
-      console.error(error)
-      return
-    }
-
-    setDoctors((data as Doctor[]) || [])
-  }
+  }, [])
 
   async function addDoctor() {
-    if (!name || !specialization) {
+    if (!name || !specialization || !clinicId) {
       alert('Fill all fields')
       return
     }
-
-    const id =
-      clinicId || (await getClinicId())
-
-    if (!id) return
 
     const { error } = await supabase
       .from('doctors')
@@ -83,7 +80,7 @@ export default function DoctorsPage() {
         {
           name,
           specialization,
-          clinic_id: id
+          clinic_id: clinicId
         }
       ])
 
@@ -96,12 +93,19 @@ export default function DoctorsPage() {
     setName('')
     setSpecialization('')
 
-    loadDoctors()
-  }
+    const { data, error: loadError } = await supabase
+      .from('doctors')
+      .select('*')
+      .eq('clinic_id', clinicId)
+      .order('name')
 
-  useEffect(() => {
-    loadDoctors()
-  }, [])
+    if (loadError) {
+      console.error(loadError)
+      return
+    }
+
+    setDoctors((data as Doctor[]) || [])
+  }
 
   return (
     <main className="max-w-4xl mx-auto p-10">
@@ -110,7 +114,6 @@ export default function DoctorsPage() {
       </h1>
 
       <div className="border p-5 rounded mb-6 space-y-4">
-
         <input
           className="border p-2 w-full"
           placeholder="Doctor Name"
@@ -135,11 +138,9 @@ export default function DoctorsPage() {
         >
           Add Doctor
         </button>
-
       </div>
 
       <div className="space-y-4">
-
         {doctors.map((doctor) => (
           <div
             key={doctor.id}
@@ -154,7 +155,6 @@ export default function DoctorsPage() {
             </p>
           </div>
         ))}
-
       </div>
     </main>
   )

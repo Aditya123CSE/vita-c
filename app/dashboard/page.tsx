@@ -1,79 +1,124 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { supabase } from '@/lib/supabase'
+import { useCallback, useEffect, useState } from 'react'
 import LogoutButton from '@/app/components/LogoutButton'
+import { supabase } from '@/lib/supabase'
+
+type Clinic = {
+  id: string
+  name: string
+}
+
+type Appointment = {
+  id: string
+  patient_name: string
+  phone: string
+  doctor_id: string
+  token_number: number
+  status: string
+  clinic_id: string
+}
 
 export default function DashboardPage() {
-  const [appointments, setAppointments] =
-    useState<any[]>([])
+  const [appointments, setAppointments] = useState<Appointment[]>([])
+  const [clinic, setClinic] = useState<Clinic | null>(null)
 
-  const [currentPatient, setCurrentPatient] =
-    useState<any>(null)
+  const loadAppointments = useCallback(async (clinicId: string) => {
+    const { data, error } = await supabase
+      .from('appointments')
+      .select('*')
+      .eq('clinic_id', clinicId)
+      .order('token_number')
 
-  const [clinicName, setClinicName] =
-    useState('')
-
-  async function loadData() {
-    const {
-      data: { user }
-    } = await supabase.auth.getUser()
-
-    if (!user) {
+    if (error) {
+      console.error(error)
       return
     }
 
-    const { data: clinic } = await supabase
-      .from('clinics')
-      .select('*')
-      .eq('user_id', user.id)
-      .single()
+    setAppointments((data as Appointment[]) || [])
+  }, [])
 
+  useEffect(() => {
+    let isMounted = true
+
+    async function initializeDashboard() {
+      const {
+        data: { user }
+      } = await supabase.auth.getUser()
+
+      if (!user || !isMounted) {
+        return
+      }
+
+      const { data, error } = await supabase
+        .from('clinics')
+        .select('id, name')
+        .eq('user_id', user.id)
+        .single()
+
+      if (error || !data || !isMounted) {
+        if (error) {
+          console.error(error)
+        }
+
+        return
+      }
+
+      const currentClinic = data as Clinic
+
+      setClinic(currentClinic)
+      await loadAppointments(currentClinic.id)
+    }
+
+    initializeDashboard()
+
+    return () => {
+      isMounted = false
+    }
+  }, [loadAppointments])
+
+  useEffect(() => {
     if (!clinic) {
       return
     }
 
-    setClinicName(clinic.name)
+    const channel = supabase
+      .channel(`dashboard-appointments-${clinic.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'appointments',
+          filter: `clinic_id=eq.${clinic.id}`
+        },
+        () => {
+          loadAppointments(clinic.id)
+        }
+      )
+      .subscribe()
 
-    const { data } = await supabase
-      .from('appointments')
-      .select('*')
-      .eq('clinic_id', clinic.id)
-      .order('token_number')
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [clinic, loadAppointments])
 
-    setAppointments(data || [])
-
-    const active = data?.find(
-      (a) => a.status === 'In Consultation'
-    )
-
-    setCurrentPatient(active || null)
-  }
-
-  useEffect(() => {
-    loadData()
-
-    const interval = setInterval(() => {
-      loadData()
-    }, 3000)
-
-    return () => clearInterval(interval)
-  }, [])
+  const currentPatient =
+    appointments.find(
+      (appointment) =>
+        appointment.status === 'In Consultation'
+    ) || null
 
   const waitingCount = appointments.filter(
-    (a) => a.status === 'Waiting'
+    (appointment) => appointment.status === 'Waiting'
   ).length
 
   const completedCount = appointments.filter(
-    (a) => a.status === 'Completed'
+    (appointment) => appointment.status === 'Completed'
   ).length
-
-  const totalAppointments =
-    appointments.length
 
   return (
     <main className="p-10 max-w-6xl mx-auto">
-
       <div className="flex justify-between items-center mb-8">
         <div>
           <h1 className="text-4xl font-bold">
@@ -81,7 +126,7 @@ export default function DashboardPage() {
           </h1>
 
           <p className="mt-2 text-gray-600">
-            {clinicName}
+            {clinic?.name || ''}
           </p>
         </div>
 
@@ -89,14 +134,13 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-4 gap-4 mb-8">
-
         <div className="border rounded p-4">
           <h2 className="font-bold">
             Total
           </h2>
 
           <p className="text-3xl">
-            {totalAppointments}
+            {appointments.length}
           </p>
         </div>
 
@@ -131,11 +175,9 @@ export default function DashboardPage() {
               : '-'}
           </p>
         </div>
-
       </div>
 
       <div className="border rounded p-5">
-
         <h2 className="text-2xl font-bold mb-4">
           Live Queue
         </h2>
@@ -164,9 +206,7 @@ export default function DashboardPage() {
             </div>
           ))
         )}
-
       </div>
-
     </main>
   )
 }
