@@ -20,6 +20,12 @@ type Appointment = {
   clinic_id: string
 }
 
+type BookingConfirmation = {
+  appointment_id: string
+  token_number: number
+  status: string
+}
+
 export default function AppointmentsPage() {
   const [patientName, setPatientName] = useState('')
   const [phone, setPhone] = useState('')
@@ -27,6 +33,7 @@ export default function AppointmentsPage() {
   const [clinicId, setClinicId] = useState('')
   const [doctors, setDoctors] = useState<Doctor[]>([])
   const [appointments, setAppointments] = useState<Appointment[]>([])
+  const [creating, setCreating] = useState(false)
 
   const loadAppointments = useCallback(async (currentClinicId: string) => {
     const { data, error } = await supabase
@@ -127,51 +134,46 @@ export default function AppointmentsPage() {
   }, [clinicId, loadAppointments])
 
   async function createAppointment() {
-    if (!patientName || !doctorId || !clinicId) {
+    if (!patientName.trim() || !doctorId || !clinicId) {
       alert('Please fill all required fields')
       return
     }
 
-    const { data: latestAppointment, error: tokenError } =
-      await supabase
-        .from('appointments')
-        .select('token_number')
-        .eq('clinic_id', clinicId)
-        .order('token_number', { ascending: false })
-        .limit(1)
-        .maybeSingle()
+    setCreating(true)
 
-    if (tokenError) {
-      console.error(tokenError)
-      alert(tokenError.message)
-      return
-    }
+    const { data, error } = await supabase.rpc(
+      'create_vita_appointment',
+      {
+        p_clinic_id: clinicId,
+        p_clinic_slug: null,
+        p_doctor_id: doctorId,
+        p_patient_name: patientName,
+        p_phone: phone
+      }
+    )
 
-    const nextToken =
-      ((latestAppointment?.token_number as number | undefined) || 0) + 1
+    setCreating(false)
 
-    const { error } = await supabase
-      .from('appointments')
-      .insert([
-        {
-          patient_name: patientName,
-          phone,
-          doctor_id: doctorId,
-          token_number: nextToken,
-          status: 'Waiting',
-          clinic_id: clinicId
-        }
-      ])
-
-    if (error) {
+    if (error || !data) {
       console.error(error)
-      alert(error.message)
+      alert(
+        error?.message ||
+          'Unable to create appointment'
+      )
       return
     }
+
+    const confirmation = data as BookingConfirmation
 
     setPatientName('')
     setPhone('')
     setDoctorId('')
+
+    await loadAppointments(clinicId)
+
+    alert(
+      `Appointment created. Token #${confirmation.token_number}`
+    )
   }
 
   async function updateStatus(
@@ -204,8 +206,8 @@ export default function AppointmentsPage() {
           className="border p-2 w-full"
           placeholder="Patient Name"
           value={patientName}
-          onChange={(e) =>
-            setPatientName(e.target.value)
+          onChange={(event) =>
+            setPatientName(event.target.value)
           }
         />
 
@@ -213,16 +215,16 @@ export default function AppointmentsPage() {
           className="border p-2 w-full"
           placeholder="Phone Number"
           value={phone}
-          onChange={(e) =>
-            setPhone(e.target.value)
+          onChange={(event) =>
+            setPhone(event.target.value)
           }
         />
 
         <select
           className="border p-2 w-full"
           value={doctorId}
-          onChange={(e) =>
-            setDoctorId(e.target.value)
+          onChange={(event) =>
+            setDoctorId(event.target.value)
           }
         >
           <option value="">
@@ -241,9 +243,12 @@ export default function AppointmentsPage() {
 
         <button
           onClick={createAppointment}
-          className="bg-black text-white px-4 py-2 rounded"
+          disabled={creating}
+          className="bg-black text-white px-4 py-2 rounded disabled:bg-gray-400"
         >
-          Create Appointment
+          {creating
+            ? 'Creating...'
+            : 'Create Appointment'}
         </button>
       </div>
 
